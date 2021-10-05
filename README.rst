@@ -88,8 +88,16 @@ See the `installation instructions <http://sporco-cuda.rtfd.io/en/latest/install
 
 ::
 
-   python examples/cmp_cbpdn.py
+   git clone https://github.com/young-oct/sporco-cuda.git
+   
+follwed by 
 
+::
+
+   cd sporco-cuda
+   python setup.py build 
+   python setup.py test 
+   python setup.py install
 License
 -------
 
