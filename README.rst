@@ -86,7 +86,9 @@ Installation
 
 See the `installation instructions <http://sporco-cuda.rtfd.io/en/latest/install.html>`_ in the `online documentation <http://sporco-cuda.rtfd.io/>`_.
 
+::
 
+   python examples/cmp_cbpdn.py
 
 License
 -------
