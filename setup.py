@@ -21,7 +21,6 @@ import numpy
 
 # The approach used in this file is copied from the cython/CUDA setup.py
 # example at https://github.com/rmcgibbo/npcuda-example
-
 def find_in_path(name, path):
     "Find a file in a search path"
 
