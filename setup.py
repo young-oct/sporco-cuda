@@ -18,6 +18,10 @@ import subprocess
 import re
 import numpy
 
+#change for windows
+nvcc_bin = 'nvcc.exe'
+lib_dir = 'lib/x64'
+
 
 # The approach used in this file is copied from the cython/CUDA setup.py
 # example at https://github.com/rmcgibbo/npcuda-example
@@ -45,7 +49,7 @@ def locate_cuda():
     # first check if the CUDAHOME env variable is in use
     if 'CUDAHOME' in os.environ:
         home = os.environ['CUDAHOME']
-        nvcc = pjoin(home, 'bin', 'nvcc.exe')
+        nvcc = pjoin(home, 'bin', nvcc_bin)
     else:
         # otherwise, search the PATH for NVCC
         nvcc = find_in_path('nvcc', os.environ['PATH'])
@@ -57,7 +61,7 @@ def locate_cuda():
 
     cudaconfig = {'home': home, 'nvcc': nvcc,
                   'include': pjoin(home, 'include'),
-                  'lib64': pjoin(home, 'lib','x64')}
+                  'lib64': pjoin(home, lib_dir)}
     for k, v in iteritems(cudaconfig):
         if not os.path.exists(v):
             raise EnvironmentError('The CUDA %s path could not be '
