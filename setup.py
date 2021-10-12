@@ -2,7 +2,6 @@ from __future__ import print_function
 from future.utils import iteritems
 from builtins import next
 from builtins import filter
-from Cython.Build import cythonize
 
 import os
 from os.path import join as pjoin
@@ -15,17 +14,11 @@ from Cython.Distutils import build_ext
 import subprocess
 import re
 import numpy
-from distutils.spawn import spawn, find_executable
-from setuptools import setup, find_packages
-from setuptools.command.build_ext import build_ext
-import sys
 
-#change for windows
-nvcc_bin = 'nvcc.exe'
-PATH = os.environ.get('PATH')
 
 # The approach used in this file is copied from the cython/CUDA setup.py
 # example at https://github.com/rmcgibbo/npcuda-example
+
 def find_in_path(name, path):
     "Find a file in a search path"
 
@@ -35,6 +28,7 @@ def find_in_path(name, path):
         if os.path.exists(binpath):
             return os.path.abspath(binpath)
     return None
+
 
 def locate_cuda():
     """Locate the CUDA environment on the system
@@ -47,7 +41,7 @@ def locate_cuda():
     # first check if the CUDAHOME env variable is in use
     if 'CUDAHOME' in os.environ:
         home = os.environ['CUDAHOME']
-        nvcc = pjoin(home, 'bin',nvcc_bin)
+        nvcc = pjoin(home, 'bin', 'nvcc')
     else:
         # otherwise, search the PATH for NVCC
         nvcc = find_in_path('nvcc', os.environ['PATH'])
@@ -59,7 +53,7 @@ def locate_cuda():
 
     cudaconfig = {'home': home, 'nvcc': nvcc,
                   'include': pjoin(home, 'include'),
-                  'lib64': pjoin(home,'lib','x64')}
+                  'lib64': pjoin(home, 'lib64')}
     for k, v in iteritems(cudaconfig):
         if not os.path.exists(v):
             raise EnvironmentError('The CUDA %s path could not be '
@@ -68,11 +62,6 @@ def locate_cuda():
     return cudaconfig
 
 
-# Obtain the numpy include directory. This logic works across numpy versions.
-try:
-    numpy_include = numpy.get_include()
-except AttributeError:
-    numpy_include = numpy.get_numpy_include()
 
 def get_cuda_version(cucnf):
     """Get the installed CUDA version from nvcc"""
@@ -87,97 +76,64 @@ def get_cuda_version(cucnf):
 
     return ver
 
+
+
+def customize_compiler_for_nvcc(self):
+    """Inject deep into distutils to customize how the dispatch
+    to gcc/nvcc works.
+    If you subclass UnixCCompiler, it's not trivial to get your subclass
+    injected in, and still have the right customizations (i.e.
+    distutils.sysconfig.customize_compiler) run on it. So instead of going
+    the OO route, I have this. Note, it's kindof like a wierd functional
+    subclassing going on.
+    """
+
+    # tell the compiler it can processes .cu
+    self.src_extensions.append('.cu')
+
+    # save references to the default compiler_so and _comple methods
+    default_compiler_so = self.compiler_so
+    super = self._compile
+
+    # now redefine the _compile method. This gets executed for each
+    # object but distutils doesn't have the ability to change compilers
+    # based on source extension: we add it.
+    def _compile(obj, src, ext, cc_args, extra_postargs, pp_opts):
+        if os.path.splitext(src)[1] == '.cu':
+            # use the cuda for .cu files
+            self.set_executable('compiler_so', CUDA['nvcc'])
+            # use only a subset of the extra_postargs, which are 1-1 translated
+            # from the extra_compile_args in the Extension class
+            postargs = extra_postargs['nvcc']
+        else:
+            postargs = extra_postargs['gcc']
+
+        super(obj, src, ext, cc_args, postargs, pp_opts)
+        # reset the default compiler_so, which we might have changed for cuda
+        self.compiler_so = default_compiler_so
+
+    # inject our redefined _compile method into the class
+    self._compile = _compile
+
+
+
 # Run the customize_compiler
 class custom_build_ext(build_ext):
-    """
-    Custom build_ext command that compiles CUDA files.
-    Note that all extension source files will be processed with this compiler.
-    """
     def build_extensions(self):
-        self.compiler.src_extensions.append('.cu')
-        self.compiler.set_executable('compiler_so', 'nvcc')
-        self.compiler.set_executable('linker_so', 'nvcc --shared')
-        if hasattr(self.compiler, '_c_extensions'):
-            self.compiler._c_extensions.append('.cu')  # needed for Windows
-        self.compiler.spawn = self.spawn
+        customize_compiler_for_nvcc(self.compiler)
         build_ext.build_extensions(self)
 
-    def spawn(self, cmd, search_path=1, verbose=0, dry_run=0):
-        """
-        Perform any CUDA specific customizations before actually launching
-        compile/link etc. commands.
-        """
-        if (sys.platform == 'darwin' and len(cmd) >= 2 and cmd[0] == 'nvcc' and
-                cmd[1] == '--shared' and cmd.count('-arch') > 0):
-            # Versions of distutils on OSX earlier than 2.7.9 inject
-            # '-arch x86_64' which we need to strip while using nvcc for
-            # linking
-            while True:
-                try:
-                    index = cmd.index('-arch')
-                    del cmd[index:index+2]
-                except ValueError:
-                    break
-        elif self.compiler.compiler_type == 'msvc':
-            # There are several things we need to do to change the commands
-            # issued by MSVCCompiler into one that works with nvcc. In the end,
-            # it might have been easier to write our own CCompiler class for
-            # nvcc, as we're only interested in creating a shared library to
-            # load with ctypes, not in creating an importable Python extension.
-            # - First, we replace the cl.exe or link.exe call with an nvcc
-            #   call. In case we're running Anaconda, we search cl.exe in the
-            #   original search path we captured further above -- Anaconda
-            #   inserts a MSVC version into PATH that is too old for nvcc.
-            cmd[:1] = ['nvcc', '--compiler-bindir',
-                       os.path.dirname(find_executable("cl.exe", PATH))
-                       or cmd[0]]
-            # - Secondly, we fix a bunch of command line arguments.
-            for idx, c in enumerate(cmd):
-                # create .dll instead of .pyd files
-                if '.pyd' in c: cmd[idx] = c = c.replace('.pyd', '.dll')
-                # replace /c by -c
-                if c == '/c': cmd[idx] = '-c'
-                # replace /DLL by --shared
-                elif c == '/DLL': cmd[idx] = '--shared'
-                # remove --compiler-options=-fPIC
-                elif '-fPIC' in c: del cmd[idx]
-                # replace /Tc... by ...
-                elif c.startswith('/Tc'): cmd[idx] = c[3:]
-                # replace /Fo... by -o ...
-                elif c.startswith('/Fo'): cmd[idx:idx+1] = ['-o', c[3:]]
-                # replace /LIBPATH:... by -L...
-                elif c.startswith('/LIBPATH:'): cmd[idx] = '-L' + c[9:]
-                # replace /OUT:... by -o ...
-                elif c.startswith('/OUT:'): cmd[idx:idx+1] = ['-o', c[5:]]
-                # remove /EXPORT:initlibcudamat or /EXPORT:initlibcudalearn
-                elif c.startswith('/EXPORT:'): del cmd[idx]
-                # replace cublas.lib by -lcublas
-                elif c == 'cublas.lib': cmd[idx] = '-lcublas'
-            # - Finally, we pass on all arguments starting with a '/' to the
-            #   compiler or linker, and have nvcc handle all other arguments
-            if '--shared' in cmd:
-                pass_on = '--linker-options='
-                # we only need MSVCRT for a .dll, remove CMT if it sneaks in:
-                cmd.append('/NODEFAULTLIB:libcmt.lib')
-            else:
-                pass_on = '--compiler-options='
-            cmd = ([c for c in cmd if c[0] != '/'] +
-                   [pass_on + ','.join(c for c in cmd if c[0] == '/')])
-            # For the future: Apart from the wrongly set PATH by Anaconda, it
-            # would suffice to run the following for compilation on Windows:
-            # nvcc -c -O -o <file>.obj <file>.cu
-            # And the following for linking:
-            # nvcc --shared -o <file>.dll <file1>.obj <file2>.obj -lcublas
-            # This could be done by a NVCCCompiler class for all platforms.
-        spawn(cmd, search_path, verbose, dry_run)
+
 
 class custom_clean(clean):
     def run(self):
         super(custom_clean, self).run()
         for f in glob(os.path.join('sporco_cuda', '*.pyx')):
             os.unlink(os.path.splitext(f)[0] + '.c')
-        for f in glob(os.path.join('sporco_cuda', '*.pyd')):
+        for f in glob(os.path.join('sporco_cuda', '*.so')):
             os.unlink(f)
+
+
 
 # Obtain the numpy include directory. This logic works across numpy versions.
 try:
@@ -186,9 +142,9 @@ except AttributeError:
     numpy_include = numpy.get_numpy_include()
 
 
+
 CUDA = locate_cuda()
 cuver = get_cuda_version(CUDA)
-
 # Default CUDA version if version number cannot be extracted from nvcc
 if cuver is None:
     cuver = '10.0'
@@ -224,8 +180,18 @@ else:
     archflg = cc[8:30]
 
 
-# M75 or SM_75, compute_75 — GTX Turing — GTX 1660 Ti
-nvcc_flags = ['-O', '--ptxas-options=-v', '-arch=sm_75', '-c', '--compiler-options=-fPIC']
+gcc_flags = ['-shared', '-O2', '-fno-strict-aliasing']
+nvcc_flags = [
+    '-Xcompiler', "'-D__builtin_stdarg_start=__builtin_va_start'",
+    '--compiler-options', "'-fno-inline'",
+    '--compiler-options', "'-fno-strict-aliasing'",
+    '--compiler-options', "'-Wall'",
+    '--compiler-options',"'-Wno-deprecated-gpu-targets'"
+    ] + archflg + [
+    '-Xcompiler', "'-fPIC'"
+    ]
+
+
 ext_util = Extension('sporco_cuda.util',
         sources= ['sporco_cuda/src/utils.cu',
                   'sporco_cuda/util.pyx'],
@@ -234,10 +200,11 @@ ext_util = Extension('sporco_cuda.util',
         language = 'c',
         runtime_library_dirs = [CUDA['lib64']],
         extra_compile_args = {
-            'gcc': [],
+            'gcc': gcc_flags,
             'nvcc': nvcc_flags
             },
         include_dirs = [numpy_include, CUDA['include'], 'sporco_cuda/src'])
+
 
 ext_cbpdn = Extension('sporco_cuda.cbpdn',
         sources= ['sporco_cuda/src/utils.cu',
@@ -250,10 +217,13 @@ ext_cbpdn = Extension('sporco_cuda.cbpdn',
         language = 'c',
         runtime_library_dirs = [CUDA['lib64']],
         extra_compile_args = {
-            'gcc': [],
+            'gcc': gcc_flags,
             'nvcc': nvcc_flags
             },
         include_dirs = [numpy_include, CUDA['include'], 'sporco_cuda/src'])
+
+
+
 
 name = 'sporco-cuda'
 pname = 'sporco_cuda'
@@ -310,5 +280,3 @@ setup(
                 'clean': custom_clean},
     # since the package has c code, the egg cannot be zipped
     zip_safe = False)
-
-
