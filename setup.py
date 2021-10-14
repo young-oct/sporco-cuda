@@ -304,7 +304,7 @@ setup(
     ],
 
     # extension module specification
-    ext_modules = [ext_util, ext_cbpdn],
+    ext_modules = cythonize([ext_util, ext_cbpdn],compiler_directives={'language_level' : "3"}),
     # inject our custom trigger
     cmdclass = {'build_ext': custom_build_ext,
                 'clean': custom_clean},
